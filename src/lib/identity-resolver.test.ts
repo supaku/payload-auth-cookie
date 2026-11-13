@@ -135,6 +135,40 @@ function fixture(initial: State = { 'app-users': [seed], 'app-accounts': [] }) {
   return { payload: mock as unknown as Payload, mock, state: () => state }
 }
 
+async function inspectSession({
+  payload,
+  authConfig = config,
+  claims,
+  user,
+  path,
+}: {
+  payload: Payload
+  authConfig?: AuthPluginConfig
+  claims: Record<string, unknown>
+  user?: Record<string, unknown>
+  path?: string
+}) {
+  const token = await new SignJWT(claims)
+    .setProtectedHeader({ alg: 'HS256' })
+    .sign(new TextEncoder().encode('test-secret'))
+  const endpoint = createAuthEndpoints(authConfig).find(
+    (entry) => entry.path === (path || `/${authConfig.name}/auth/session`),
+  )!
+  const response = await endpoint.handler({
+    payload,
+    user,
+    headers: new Headers({ cookie: `sso=${token}` }),
+  } as never)
+  return {
+    status: response.status,
+    body: (await response.json()) as {
+      authenticated?: boolean
+      user?: Record<string, unknown> | null
+      error?: string
+    },
+  }
+}
+
 afterEach(() => vi.unstubAllGlobals())
 
 describe('stable linked identities', () => {
@@ -514,6 +548,256 @@ describe('stable linked identities', () => {
       )
     },
   )
+
+  it.each(['revoked', 'unbound'])(
+    'session endpoint rejects a %s subject using a victim email without modifying the victim',
+    async (state) => {
+      const victim = { id: '99', email: 'victim@example.test', role: 'admin', name: 'Victim' }
+      const attacker = { id: '1', email: 'attacker@example.test', name: 'Attacker' }
+      const f = fixture({ 'app-users': [victim, attacker], 'app-accounts': [] })
+      const identity = { provider: 'supaku', subject: 'revoked-attacker-subject' }
+      if (state === 'revoked') {
+        await linkAccountIdentity({
+          payload: f.payload,
+          config,
+          identity,
+          userID: attacker.id,
+          linkedBy: 'seed:reviewer',
+        })
+        await revokeAccountIdentity({
+          payload: f.payload,
+          config,
+          identity,
+          linkedBy: 'revoke:reviewer',
+        })
+      }
+      f.mock.find.mockClear()
+      f.mock.update.mockClear()
+      const token = await new SignJWT({
+        userId: identity.subject,
+        email: victim.email,
+        name: 'attacker supplied',
+        emailVerified: true,
+      })
+        .setProtectedHeader({ alg: 'HS256' })
+        .sign(new TextEncoder().encode('test-secret'))
+      const endpoint = createAuthEndpoints(config).find(
+        (endpoint) => endpoint.path === '/app/auth/session',
+      )!
+      const response = await endpoint.handler({
+        payload: f.payload,
+        headers: new Headers({ cookie: `sso=${token}` }),
+      } as never)
+      expect(await response.json()).toEqual({ authenticated: false })
+      expect(f.state()['app-users'].find((user) => user.id === victim.id)).toEqual(victim)
+      expect(f.mock.update).not.toHaveBeenCalled()
+      expect(f.mock.find.mock.calls.every(([args]) => args.collection === 'app-accounts')).toBe(
+        true,
+      )
+    },
+  )
+
+  it.each(['app', 'admin'])(
+    'session endpoint for %s follows the bound subject after email changes without selecting the email collision',
+    async (realm) => {
+      const owner = { id: 'bound', email: seed.email }
+      const victim = { id: 'victim', email: 'new@example.test', role: 'admin', name: 'Victim' }
+      const realmConfig = {
+        ...config,
+        name: realm,
+        usersCollectionSlug: `${realm}-users`,
+        accountsCollectionSlug: `${realm}-accounts`,
+      }
+      const f = fixture({ [`${realm}-users`]: [owner, victim], [`${realm}-accounts`]: [] })
+      await linkAccountIdentity({
+        payload: f.payload,
+        config: realmConfig,
+        identity: { provider: 'supaku', subject: session.userId },
+        userID: owner.id,
+        linkedBy: 'seed:binding',
+      })
+      f.mock.find.mockClear()
+      const response = await inspectSession({
+        payload: f.payload,
+        authConfig: realmConfig,
+        claims: { ...session, email: victim.email, name: 'Updated bound profile' },
+      })
+      expect(response.body.authenticated).toBe(true)
+      expect(response.body.user).toMatchObject({
+        id: owner.id,
+        email: owner.email,
+        name: 'Updated bound profile',
+        _strategy: 'sso-cookie',
+        collection: realmConfig.usersCollectionSlug,
+      })
+      expect(
+        f.state()[realmConfig.usersCollectionSlug].find((user) => user.id === victim.id),
+      ).toEqual(victim)
+      expect(
+        f.mock.find.mock.calls.every(
+          ([args]) => args.collection === realmConfig.accountsCollectionSlug,
+        ),
+      ).toBe(true)
+    },
+  )
+
+  it('session checks never provision users or verified-email bindings, including open signup mode', async () => {
+    const f = fixture()
+    const open = { ...config, allowSignUp: true, onSuccess: vi.fn(), onError: vi.fn() }
+    for (const claims of [session, { ...session, email: 'new@example.test' }]) {
+      expect((await inspectSession({ payload: f.payload, authConfig: open, claims })).body).toEqual(
+        { authenticated: false },
+      )
+    }
+    expect(f.mock.create).not.toHaveBeenCalled()
+    expect(f.mock.db.beginTransaction).not.toHaveBeenCalled()
+    expect(open.onSuccess).not.toHaveBeenCalled()
+    expect(open.onError).not.toHaveBeenCalled()
+  })
+
+  it('session checks reject missing subjects and accounts from another realm', async () => {
+    const f = fixture({
+      'app-users': [seed],
+      'app-accounts': [],
+      'admin-users': [{ ...seed, id: 'admin' }],
+      'admin-accounts': [],
+    })
+    await resolveSSOUser({ payload: f.payload, config, session })
+    expect(
+      (await inspectSession({ payload: f.payload, claims: { email: seed.email } })).body,
+    ).toEqual({ authenticated: false })
+    const admin = {
+      ...config,
+      name: 'admin',
+      useAdmin: true,
+      usersCollectionSlug: 'admin-users',
+      accountsCollectionSlug: 'admin-accounts',
+    }
+    expect(
+      (await inspectSession({ payload: f.payload, authConfig: admin, claims: session })).body,
+    ).toEqual({ authenticated: false })
+    expect(f.state()['admin-accounts']).toHaveLength(0)
+  })
+
+  it('legacy session checks preserve email/profile sync and never provision even when signup is open', async () => {
+    const f = fixture()
+    const legacy = {
+      ...config,
+      identity: undefined,
+      accountsCollectionSlug: undefined,
+      allowSignUp: true,
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+    }
+    const existing = await inspectSession({
+      payload: f.payload,
+      authConfig: legacy,
+      claims: { email: seed.email, name: 'Legacy update' },
+    })
+    expect(existing.body).toMatchObject({
+      authenticated: true,
+      user: {
+        id: seed.id,
+        name: 'Legacy update',
+        collection: 'app-users',
+        _strategy: 'sso-cookie',
+      },
+    })
+    expect(
+      (
+        await inspectSession({
+          payload: f.payload,
+          authConfig: legacy,
+          claims: { email: 'missing@example.test' },
+        })
+      ).body,
+    ).toEqual({ authenticated: false })
+    expect(f.mock.create).not.toHaveBeenCalled()
+    expect(legacy.onSuccess).not.toHaveBeenCalled()
+    expect(legacy.onError).not.toHaveBeenCalled()
+  })
+
+  it('session infrastructure failures remain HTTP 500 rather than authenticating', async () => {
+    const f = fixture()
+    f.mock.find.mockRejectedValue(new Error('database unavailable'))
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const response = await inspectSession({ payload: f.payload, claims: session })
+      expect(response.status).toBe(500)
+      expect(response.body).toEqual({ error: 'Failed to check session' })
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('linked /users/me rechecks central identity ownership and revocation instead of trusting stale req.user', async () => {
+    const f = fixture({ 'admin-users': [seed], 'admin-accounts': [] })
+    const admin = {
+      ...config,
+      name: 'admin',
+      useAdmin: true,
+      usersCollectionSlug: 'admin-users',
+      accountsCollectionSlug: 'admin-accounts',
+    }
+    const bound = await resolveSSOUser({ payload: f.payload, config: admin, session })
+    const user = { ...bound, collection: 'admin-users' }
+    expect(
+      (
+        await inspectSession({
+          payload: f.payload,
+          authConfig: admin,
+          claims: session,
+          user,
+          path: '/users/me',
+        })
+      ).body.user?.id,
+    ).toBe(seed.id)
+    expect(
+      (
+        await inspectSession({
+          payload: f.payload,
+          authConfig: admin,
+          claims: session,
+          user: { ...user, id: 'forged' },
+          path: '/users/me',
+        })
+      ).body.user,
+    ).toBeNull()
+    await revokeAccountIdentity({
+      payload: f.payload,
+      config: admin,
+      identity: { provider: 'supaku', subject: session.userId },
+      linkedBy: 'revoke:mirror',
+    })
+    expect(
+      (
+        await inspectSession({
+          payload: f.payload,
+          authConfig: admin,
+          claims: session,
+          user,
+          path: '/users/me',
+        })
+      ).body.user,
+    ).toBeNull()
+  })
+
+  it('scopes native JWT fallback denial to the linked Payload instance and collection', async () => {
+    const first = fixture()
+    const other = fixture()
+    const jwt = {
+      name: 'local-jwt',
+      authenticate: vi.fn(async (_args: { payload: Payload }) => ({
+        user: { id: seed.id, collection: 'app-users' },
+      })),
+    }
+    Object.assign(first.payload, { authStrategies: [jwt] })
+    Object.assign(other.payload, { authStrategies: [jwt] })
+    const linked = createCookieAuthStrategy('app-users', config.sso, false, config)
+    await linked.authenticate({ payload: first.payload, headers: new Headers() })
+    expect((await jwt.authenticate({ payload: first.payload })).user).toBeNull()
+    expect((await jwt.authenticate({ payload: other.payload })).user?.id).toBe(seed.id)
+  })
 
   it('rejects forged context grants and ordinary overrideAccess writes', () => {
     const accounts = withAccountsCollection(

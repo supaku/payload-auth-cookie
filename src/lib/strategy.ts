@@ -3,6 +3,8 @@ import type { AuthPluginConfig, SSOProviderConfig } from '../types.js'
 import { resolveSSOUser } from './identity-resolver.js'
 import { parseCookies, validateSSOSession } from './sso-session.js'
 
+const guardedJWTStrategies = new WeakMap<object, WeakMap<Payload, Set<string>>>()
+
 export interface CookieAuthStrategyOptions {
   collectionSlug: string
   ssoConfig: SSOProviderConfig
@@ -31,6 +33,9 @@ export function createCookieAuthStrategy(
     name: `sso-cookie-${collectionSlug}`,
     authenticate: async ({ headers, payload }: { headers: Headers; payload: Payload }) => {
       try {
+        if (identityOptions?.accountsCollectionSlug) {
+          rejectLocalJWTFallback({ payload, collectionSlug })
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Payload's collections object uses dynamic keys
         const collection = (payload.collections as any)[collectionSlug]
 
@@ -86,4 +91,35 @@ export function createCookieAuthStrategy(
       }
     },
   }
+}
+
+/** Payload's global JWT strategy does not honor a target collection's disableLocalStrategy. */
+function rejectLocalJWTFallback({
+  payload,
+  collectionSlug,
+}: {
+  payload: Payload
+  collectionSlug: string
+}): void {
+  const strategy = payload.authStrategies?.find((entry) => entry.name === 'local-jwt')
+  if (!strategy) {
+    return
+  }
+  let scopes = guardedJWTStrategies.get(strategy)
+  if (!scopes) {
+    scopes = new WeakMap<Payload, Set<string>>()
+    guardedJWTStrategies.set(strategy, scopes)
+    const blocked = scopes
+    const authenticate = strategy.authenticate
+    strategy.authenticate = async (args) => {
+      const result = await authenticate(args)
+      if (result.user && blocked.get(args.payload)?.has(result.user.collection)) {
+        return { ...result, user: null }
+      }
+      return result
+    }
+  }
+  const collections = scopes.get(payload) || new Set<string>()
+  collections.add(collectionSlug)
+  scopes.set(payload, collections)
 }

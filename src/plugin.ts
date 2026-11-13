@@ -81,6 +81,13 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
     if (!existingUserCollection) {
       const userCollection = createUsersCollection(config.usersCollectionSlug, config.useAdmin)
 
+      if (config.accountsCollectionSlug) {
+        userCollection.auth = {
+          ...(typeof userCollection.auth === 'object' ? userCollection.auth : {}),
+          disableLocalStrategy: true,
+        }
+      }
+
       if (userCollection.auth && typeof userCollection.auth === 'object') {
         userCollection.auth.strategies = [
           ...(userCollection.auth.strategies || []),
@@ -95,6 +102,18 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
         const existingCollection = withUsersCollection(collections[index])
 
         let authConfig = existingCollection.auth
+        if (config.accountsCollectionSlug && authConfig === false) {
+          throw new Error('Linked identities require an auth-enabled users collection')
+        }
+        if (
+          config.accountsCollectionSlug &&
+          typeof authConfig === 'object' &&
+          authConfig.useAPIKey
+        ) {
+          throw new Error(
+            'Linked identities require central SSO; native API-key auth cannot be enabled',
+          )
+        }
         if (authConfig !== false) {
           if (authConfig === true || authConfig === undefined) {
             authConfig = {
@@ -110,7 +129,10 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
 
         collections[index] = {
           ...existingCollection,
-          auth: authConfig,
+          auth:
+            config.accountsCollectionSlug && typeof authConfig === 'object'
+              ? { ...authConfig, disableLocalStrategy: true }
+              : authConfig,
         }
       }
     }

@@ -67,6 +67,27 @@ ordinary Local API `overrideAccess: true` writes. Internal writes use an opaque 
 capability, so request context flags cannot grant mutation rights. Read defaults to the linked user
 reading their own rows. Configure application-specific admin read access explicitly for visibility.
 
+The cookie strategy, login endpoint, and session inspection handlers use the same identity resolver.
+The `/{name}/auth/session` handler only inspects existing active bindings: it never creates users or
+accounts or bootstraps by email. **Payload runs authentication strategies before endpoint handlers.**
+Consequently a full session request may enroll an identity first when automatic signup or verified
+bootstrap is explicitly enabled. This preserves existing automatic strategy enrollment behavior.
+Closed signup never creates a new user; configured verified bootstrap may only bind an existing,
+unlinked, exact-email user. A revoked or already-linked identity cannot be claimed by another subject.
+In multi-auth installations, Payload stops after the first successful strategy; use the realm's explicit
+`/{name}/auth/login` endpoint when that realm needs enrollment and an earlier realm already authenticated.
+Legacy session handlers retain email/profile synchronization without creating missing users themselves.
+Expected handler denials return `{ authenticated: false }`; infrastructure failures remain HTTP 500.
+Session handlers do not invoke login callbacks.
+
+Linked mode disables native local-password login and rejects native API-key configuration for its
+user collection. Payload's global JWT fallback can otherwise target a linked collection in mixed-auth
+installations; the linked cookie strategy filters those fallback results per Payload instance and
+collection. Old or server-helper-minted Payload JWTs cannot substitute for central SSO. Unrelated local
+collections keep their existing JWT authentication. The linked `/users/me` admin mirror also rechecks
+the central session, active binding, and authenticated source user ID. Consumer-provided custom auth
+strategies remain trusted server code and must uphold the same central identity policy.
+
 ### Migration, signup, linking, and revocation
 
 - Existing active bindings authenticate even with `allowSignUp: false` or a changed display email.
@@ -88,6 +109,12 @@ reading their own rows. Configure application-specific admin read access explici
   `linkedBy` identifies the trusted actor or domain command for this operation; the original link
   provenance is retained separately from `revokedBy` and `revokedAt`. Revocation is terminal through
   these APIs: rows cannot be deleted, reassigned, or reactivated by login/email bootstrap.
+
+The plugin does not implement user hard-deletion or data-retention commands. Account tombstones retain
+required user references. PostgreSQL may reject deleting bound users through FK/NOT NULL constraints;
+MongoDB can leave dangling references, whose identities then fail closed when the user cannot be read.
+Consumers should retain bound user records or define a reviewed domain retention policy. Disposable
+test databases should use their harness-owned teardown rather than deleting identity tombstones.
 
 Create the consumer's normal Payload migration **and JSON schema snapshot** for the new account
 collection and its unique indexes before enabling linked mode in production. Existing user IDs stay

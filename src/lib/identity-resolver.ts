@@ -13,23 +13,29 @@ type ResolverConfig = Pick<
   'name' | 'usersCollectionSlug' | 'accountsCollectionSlug' | 'identity' | 'allowSignUp'
 >
 
+/** Expected authentication rejection, distinct from infrastructure failures. */
+export class SSOAuthenticationError extends Error {}
+
 /** Shared by the cookie strategy and login endpoint. The caller must validate the SSO session first. */
 export async function resolveSSOUser({
   payload,
   config,
   session,
+  allowProvisioning = true,
 }: {
   payload: Payload
   config: ResolverConfig
   session: SSOSessionData
+  /** Session inspection never creates a user, account, or migration binding. */
+  allowProvisioning?: boolean
 }): Promise<User> {
-  if (!config.accountsCollectionSlug) {
-    return resolveLegacyUser({ payload, config, session })
+  if (!config.accountsCollectionSlug && !config.identity) {
+    return resolveLegacyUser({ payload, config, session, allowProvisioning })
   }
   assertLinkedConfig(config)
   const subject = getNestedValue(session, config.identity!.subjectField)
   if (typeof subject !== 'string' || !subject.trim()) {
-    throw new Error('SSO session missing stable subject')
+    throw new SSOAuthenticationError('SSO session missing stable subject')
   }
   const identity = { provider: config.identity!.provider, subject }
   const bound = await findAccount({ payload, config, identity })
@@ -40,6 +46,10 @@ export async function resolveSSOUser({
       account: bound,
       session,
     })
+  }
+
+  if (!allowProvisioning) {
+    throw new SSOAuthenticationError('Identity is not bound')
   }
 
   // Each attempt has an independent transaction. Database uniqueness, rather than an in-process
@@ -401,7 +411,7 @@ async function authenticatedAccountUser({
   req?: Partial<PayloadRequest>
 }): Promise<User> {
   if (account.status !== 'active') {
-    throw new Error('Identity has been revoked')
+    throw new SSOAuthenticationError('Identity has been revoked')
   }
   const user = await readAccountUser({ payload, config, account, req })
   return attachIdentity(await updateProfile({ payload, config, user, session, req }), config, {
@@ -560,14 +570,16 @@ async function resolveLegacyUser({
   payload,
   config,
   session,
+  allowProvisioning,
 }: {
   payload: Payload
   config: ResolverConfig
   session: SSOSessionData
+  allowProvisioning: boolean
 }): Promise<User> {
   const email = getEmailFromSession(session)
   if (!email) {
-    throw new Error('SSO session missing email')
+    throw new SSOAuthenticationError('SSO session missing email')
   }
   const users = await payload.find({
     collection: config.usersCollectionSlug as never,
@@ -578,6 +590,9 @@ async function resolveLegacyUser({
   const user = users.docs[0] as User | undefined
   if (user) {
     return updateProfile({ payload, config, user, session })
+  }
+  if (!allowProvisioning) {
+    throw new SSOAuthenticationError('User not found')
   }
   if (!config.allowSignUp) {
     throw new Error('Sign-up is not allowed')

@@ -72,6 +72,34 @@ describe('linked account plugin configuration', () => {
     ).toThrow('matching user collection and realm')
   })
 
+  it('enforces central-only linked auth without changing legacy local auth settings', () => {
+    const linked = {
+      ...base,
+      accountsCollectionSlug: 'accounts',
+      identity: { provider: 'central', subjectField: 'userId' },
+    }
+    const local = {
+      ...incoming,
+      collections: [{ slug: 'admin-users', auth: {}, fields: [] }],
+    }
+    const legacyAuth = authPlugin(base)(structuredClone(local)).collections![0].auth
+    expect(legacyAuth).not.toHaveProperty('disableLocalStrategy')
+    const linkedAuth = authPlugin(linked)(structuredClone(local)).collections![0].auth
+    expect(linkedAuth).toMatchObject({ disableLocalStrategy: true })
+    expect(() =>
+      authPlugin(linked)({
+        ...incoming,
+        collections: [{ slug: 'admin-users', auth: false, fields: [] }],
+      }),
+    ).toThrow('auth-enabled')
+    expect(() =>
+      authPlugin(linked)({
+        ...incoming,
+        collections: [{ slug: 'admin-users', auth: { useAPIKey: true }, fields: [] }],
+      }),
+    ).toThrow('API-key')
+  })
+
   it('rejects reserved identity field overrides and ignores caller-supplied mutation grants', () => {
     expect(() =>
       withAccountsCollection(
