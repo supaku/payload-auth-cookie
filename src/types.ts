@@ -127,6 +127,16 @@ export interface SSOProviderConfig {
   fieldMappings?: FieldMappingConfig
 }
 
+/** Subject paths read only from a successfully validated central SSO response. */
+export type LinkedIdentityConfig = {
+  /** Trusted provider namespace, fixed by server configuration rather than a session claim. */
+  provider: string
+  /** e.g. 'userId' for Supaku JWTs, 'id' for the unwrapped /api/session/me user. */
+  subjectField: string
+  /** Explicit, temporary migration permission. Requires a boolean true verified email claim. */
+  allowVerifiedEmailBootstrap?: boolean
+}
+
 /**
  * Authentication plugin configuration
  */
@@ -163,6 +173,10 @@ export interface AuthPluginConfig {
    */
   usersCollectionSlug: string
 
+  /** Opt in to stable subject authentication. Both options must be provided together. */
+  accountsCollectionSlug?: string
+  identity?: LinkedIdentityConfig
+
   /**
    * Path to redirect to after successful authentication
    * @default '/'
@@ -193,10 +207,7 @@ export interface AuthPluginConfig {
   /**
    * Custom error handler
    */
-  onError?: (args: {
-    error: Error
-    req: Request
-  }) => Promise<void> | void
+  onError?: (args: { error: Error; req: Request }) => Promise<void> | void
 }
 
 /**

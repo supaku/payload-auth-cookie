@@ -20,9 +20,7 @@ describe('withUsersCollection', () => {
       auth: true,
     })
 
-    const fieldNames = config.fields
-      .filter((f): f is { name: string } => 'name' in f)
-      .map((f) => f.name)
+    const fieldNames = config.fields.flatMap((f) => ('name' in f ? [f.name] : []))
 
     expect(fieldNames).toContain('customField')
     expect(fieldNames).toContain('email')
@@ -36,9 +34,7 @@ describe('withUsersCollection', () => {
       auth: true,
     })
 
-    const emailFields = config.fields.filter(
-      (f): f is { name: string } => 'name' in f && f.name === 'email',
-    )
+    const emailFields = config.fields.filter((f) => 'name' in f && f.name === 'email')
 
     expect(emailFields.length).toBe(1)
   })

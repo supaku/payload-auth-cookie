@@ -13,6 +13,136 @@ This plugin allows you to authenticate users based on cookies set by an external
 - 🔄 Session validation via external API or JWT verification
 - 📦 TypeScript support with full type definitions
 
+## Stable linked accounts (opt in)
+
+Existing consumers keep email-based behavior unless `accountsCollectionSlug` and `identity` are
+configured together. Linked mode authenticates the trusted central **provider + subject** in the
+configured realm (`name`) before considering email. Central Supaku authentication stays authoritative;
+local account rows store identity bindings and provenance, never OAuth access tokens, refresh tokens,
+SSO cookies, or JWTs.
+
+```ts
+import { authPlugin, withAccountsCollection, withUsersCollection } from 'payload-auth-cookie'
+
+const AppUsers = withUsersCollection({
+  slug: 'app-users',
+  auth: { disableLocalStrategy: true },
+})
+const AppAccounts = withAccountsCollection(
+  { slug: 'app-accounts' },
+  { usersCollectionSlug: AppUsers.slug, realm: 'app' },
+)
+
+const appAuth = {
+  name: 'app',
+  usersCollectionSlug: AppUsers.slug,
+  accountsCollectionSlug: AppAccounts.slug,
+  allowSignUp: process.env.SOCIAL_ALLOW_SIGNUPS === 'true',
+  identity: {
+    provider: 'supaku-account', // Fixed trusted namespace, never read from an untrusted request.
+    subjectField: 'userId', // Central Supaku JWT's stable database UUID; NOT email or OAuth ID.
+    allowVerifiedEmailBootstrap: false,
+  },
+  sso: {
+    cookieName: 'supaku_session',
+    loginUrl: 'https://account.supaku.com/login',
+    logoutUrl: 'https://account.supaku.com/logout',
+    jwt: { secret: process.env.SSO_JWT_SECRET! },
+  },
+}
+// buildConfig({ collections: [AppUsers, AppAccounts], plugins: [authPlugin(appAuth)] })
+```
+
+For central `/api/session/me`, the existing session validator unwraps the returned `user` object.
+Configure `identity.subjectField: 'id'` for that response instead of the JWT's `userId`. Both paths
+require successfully validated central sessions. Dot paths are supported. Pin trusted issuer and
+audience in `sso.jwt` when your central token contract provides those claims. The configured provider
+namespace must be consistent across realms that intentionally share a central identity.
+
+`withAccountCollection` is an alias for `withAccountsCollection`. The plugin creates the accounts
+collection automatically if it is absent. An explicitly supplied collection must use the helper with
+matching `usersCollectionSlug` and `realm`. Custom fields and read access are supported; reserved
+identity fields cannot be overridden. Account create/update/delete access stays closed, including
+ordinary Local API `overrideAccess: true` writes. Internal writes use an opaque Payload-instance
+capability, so request context flags cannot grant mutation rights. Read defaults to the linked user
+reading their own rows. Configure application-specific admin read access explicitly for visibility.
+
+### Migration, signup, linking, and revocation
+
+- Existing active bindings authenticate even with `allowSignUp: false` or a changed display email.
+  Email changes never change the user relationship or merge users. Local user email remains unchanged.
+- Closed signup refuses unknown users. Open signup creates the local user and its first account in one
+  transaction. A user email collision requires explicit binding; it never silently links another
+  subject to an existing user.
+- To migrate existing unlinked users, temporarily set `allowVerifiedEmailBootstrap: true`. It requires
+  one exact stored email match and a boolean `emailVerified: true` from the validated mapped session.
+  It works with closed signup. Unverified, ambiguous, and already-linked users are rejected.
+- An immutable unique initial-binding tombstone prevents concurrent different subjects from claiming
+  the same legacy user. Revocation retains this guard and the unique provider/subject reservation.
+- For deliberate server-controlled linking, use
+  `linkAccountIdentity({ payload, config: appAuth, userID, identity: { provider, subject }, linkedBy })`.
+  The caller must authorize its domain command and independently prove ownership of the identity.
+  Multiple identities may point to one user. No generic unauthenticated linking endpoint is installed.
+  Central Supaku still owns OAuth provider linking, token storage, and ownership verification.
+- Use `revokeAccountIdentity({ payload, config: appAuth, identity, linkedBy })` to revoke a binding.
+  `linkedBy` identifies the trusted actor or domain command for this operation; the original link
+  provenance is retained separately from `revokedBy` and `revokedAt`. Revocation is terminal through
+  these APIs: rows cannot be deleted, reassigned, or reactivated by login/email bootstrap.
+
+Create the consumer's normal Payload migration **and JSON schema snapshot** for the new account
+collection and its unique indexes before enabling linked mode in production. Existing user IDs stay
+unchanged. The plugin does not migrate or touch central provider credentials. Migration bootstrap is
+an explicit trust policy: enable it only when the central service reliably verifies email ownership,
+then disable it after controlled migration. Alternatively seed bindings from a reviewed stable-ID
+mapping using the server linking API, with no email bootstrap.
+
+Binding creation, linking, and revocation require adapter transactions. MongoDB requires a replica set;
+transaction-disabled adapters fail closed for mutations. Unique indexes arbitrate races across server
+processes, and failed bindings roll back the associated user creation. A fresh lookup confirms the
+binding after commit. Existing active bindings remain readable without a new binding transaction.
+Queries inside binding transactions disable pagination to avoid parallel count/find operations on the
+same MongoDB session. Application hooks must propagate `req` for their own transactional writes and
+avoid external side effects that database rollback cannot undo.
+
+### Mapping admin identity to app permissions
+
+Linked authentication returns ephemeral `user._ssoIdentity = { realm, provider, subject }`. It contains
+no token or cookie material. **Metadata alone is not authority.** The authenticated user must come
+from Payload authentication; never accept a user/metadata object supplied by a client as proof.
+
+```ts
+import { findUserForAuthenticatedIdentity } from 'payload-auth-cookie'
+
+const appUser = await findUserForAuthenticatedIdentity({
+  payload: req.payload,
+  sourceConfig: adminAuth,
+  targetConfig: appAuth,
+  user: req.user,
+})
+// Apply the actual app user's domain permissions and use the existing domain commands.
+```
+
+This helper validates the authenticated source collection, realm, configured provider, active source
+binding, and source binding ownership against the user's ID before resolving the exact same central
+provider/subject in the target realm. Forged hints, mismatched ownership, unbound or revoked subjects,
+and provider mismatches return `null`. It does not combine multiple user identities or grant business
+collection access. `findUserByIdentity({ payload, config, identity })` is a lower-level server-only exact
+lookup; its caller is responsible for equivalent source authentication and domain authorization.
+
+### Local verification
+
+```sh
+pnpm test:int --run
+# Disposable local MongoDB replica set; never reads DATABASE_URI:
+RUN_IDENTITY_ADAPTER_TESTS=1 pnpm test:int --run src/lib/identity-mongodb.test.ts
+# Disposable local Postgres cluster using the dev workspace's pinned adapter:
+RUN_IDENTITY_POSTGRES_TESTS=1 PG_TEST_BIN=/path/to/postgres/bin pnpm test:int --run src/lib/identity-postgres.test.ts
+```
+
+Adapter suites are opt in. They start/stop only isolated local fixture servers and never use application
+connection strings. The Postgres suite defaults to Homebrew PostgreSQL 17 on macOS, allocates a free
+loopback port, closes its own pool, stops its own cluster, and removes only its temporary directory.
+
 ## Installation
 
 ```bash

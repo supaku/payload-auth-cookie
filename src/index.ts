@@ -8,7 +8,13 @@
  */
 
 export { authPlugin } from './plugin.js'
-export type { AuthPluginConfig, SSOProviderConfig, JWTVerificationConfig, AuthPlugin } from './types.js'
+export type {
+  AuthPluginConfig,
+  SSOProviderConfig,
+  JWTVerificationConfig,
+  AuthPlugin,
+  LinkedIdentityConfig,
+} from './types.js'
 export { createUsersCollection } from './collections/createUsersCollection.js'
 export {
   generateUserToken,
@@ -32,3 +38,12 @@ export { createSSOProviderConfig } from './lib/helpers.js'
 export { withUsersCollection } from './collection/index.js'
 
 export { getAdminAuthCollection } from './utilities/getAdminAuthCollection.js'
+
+export { withAccountsCollection, withAccountCollection } from './collection/index.js'
+export {
+  findUserByIdentity,
+  findUserForAuthenticatedIdentity,
+  linkAccountIdentity,
+  revokeAccountIdentity,
+} from './lib/identity-resolver.js'
+export type { AccountIdentity } from './lib/identity-resolver.js'
