@@ -39,7 +39,6 @@ jobs:
         with:
           node-version: 24
           cache: 'pnpm'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         timeout-minutes: 5
@@ -94,7 +93,7 @@ jobs:
         if: steps.check.outputs.should_publish == 'true'
         run: |
           pnpm pack --pack-destination "$RUNNER_TEMP/npm-release"
-          npm publish "$RUNNER_TEMP/npm-release/payload-auth-cookie-${{ steps.check.outputs.version }}.tgz" --provenance --access public
+          env -u NODE_AUTH_TOKEN -u NPM_CONFIG_USERCONFIG npm publish "$RUNNER_TEMP/npm-release/payload-auth-cookie-${{ steps.check.outputs.version }}.tgz" --provenance --access public --registry https://registry.npmjs.org --loglevel verbose
 
       - name: Modify package.json for GitHub Packages
         timeout-minutes: 3
