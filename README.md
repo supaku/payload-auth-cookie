@@ -170,6 +170,18 @@ Adapter suites are opt in. They start/stop only isolated local fixture servers a
 connection strings. The Postgres suite defaults to Homebrew PostgreSQL 17 on macOS, allocates a free
 loopback port, closes its own pool, stops its own cluster, and removes only its temporary directory.
 
+## Package registries
+
+The public npm package remains `payload-auth-cookie`. GitHub Packages mirrors releases as
+`@supaku/payload-auth-cookie`, matching the repository's organization. The previous
+`@markkropf/payload-auth-cookie` namespace is left intact and is no longer published by this workflow.
+Existing consumers of that namespace must explicitly choose the new scope to receive new mirrors;
+unscoped npm consumers require no package-name change.
+
+GitHub Packages consumers must configure `@supaku:registry=https://npm.pkg.github.com` and authenticate
+with package read access. The workflow checks each registry independently, so retrying a missing
+GitHub mirror does not republish an existing npm version.
+
 ## Installation
 
 ```bash

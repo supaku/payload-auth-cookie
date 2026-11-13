@@ -74,13 +74,13 @@ jobs:
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          if npm view $PACKAGE_NAME@$PACKAGE_VERSION version 2>/dev/null; then
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version 2>/dev/null; then
             echo "Version $PACKAGE_VERSION already exists on npm"
-            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "Version $PACKAGE_VERSION does not exist on npm, will publish"
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-            echo "version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update npm for Trusted Publishers
@@ -97,31 +97,90 @@ jobs:
 
       - name: Modify package.json for GitHub Packages
         timeout-minutes: 3
-        if: steps.check.outputs.should_publish == 'true'
         run: |
-          # Create a scoped version of the package for GitHub Packages
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = '@markkropf/payload-auth-cookie';
+            pkg.name = '@' + process.env.GITHUB_REPOSITORY_OWNER.toLowerCase() + '/' + pkg.name;
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
       - name: Setup Node.js for GitHub Packages
         timeout-minutes: 3
-        if: steps.check.outputs.should_publish == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: 'https://npm.pkg.github.com'
-          scope: '@markkropf'
+          scope: '@${{ github.repository_owner }}'
+
+      - name: Check if version exists on GitHub Packages
+        timeout-minutes: 3
+        id: github-package
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'
+          import { spawnSync } from 'node:child_process'
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          const result = spawnSync('npm', [
+            'view', `${pkg.name}@${pkg.version}`, 'version', '--json',
+            '--registry', 'https://npm.pkg.github.com',
+          ], { encoding: 'utf8' })
+          let response
+          try { response = JSON.parse(result.stdout) } catch {}
+          if (result.status === 0 && response === pkg.version) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_publish=false\n')
+            console.log(`${pkg.name}@${pkg.version} already exists; skipping mirror upload`)
+          } else if (result.status !== 0 && response?.error?.code === 'E404') {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_publish=true\n')
+            console.log(`${pkg.name}@${pkg.version} does not exist; publishing mirror`)
+          } else {
+            process.stderr.write(result.stderr || '')
+            throw new Error(`GitHub Packages version lookup failed (exit ${result.status})`)
+          }
+          NODE
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to GitHub Packages
         timeout-minutes: 3
-        if: steps.check.outputs.should_publish == 'true'
+        if: steps.github-package.outputs.should_publish == 'true'
         run: |
           pnpm pack --pack-destination "$RUNNER_TEMP/github-release"
-          npm publish "$RUNNER_TEMP/github-release/markkropf-payload-auth-cookie-${{ steps.check.outputs.version }}.tgz" --access public --registry https://npm.pkg.github.com
+          archive=$(node -p "require('./package.json').name.slice(1).replace('/', '-') + '-' + require('./package.json').version + '.tgz'")
+          npm publish "$RUNNER_TEMP/github-release/$archive" --access public --registry https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify GitHub Packages artifact
+        timeout-minutes: 3
+        run: |
+          package=$(node -p "require('./package.json').name + '@' + require('./package.json').version")
+          archive=$(node -p "require('./package.json').name.slice(1).replace('/', '-') + '-' + require('./package.json').version + '.tgz'")
+          mkdir -p "$RUNNER_TEMP/github-verification/extracted"
+          for attempt in 1 2 3; do
+            if npm pack "$package" --pack-destination "$RUNNER_TEMP/github-verification" --registry https://npm.pkg.github.com; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 5
+          done
+          tar -xzf "$RUNNER_TEMP/github-verification/$archive" -C "$RUNNER_TEMP/github-verification/extracted"
+          diff -r dist "$RUNNER_TEMP/github-verification/extracted/package/dist"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+          import path from 'node:path'
+          const expected = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          const directory = path.join(process.env.RUNNER_TEMP, 'github-verification/extracted/package')
+          const actual = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'))
+          assert.equal(actual.name, expected.name)
+          assert.equal(actual.version, expected.version)
+          assert.deepEqual(actual.exports, expected.publishConfig.exports)
+          for (const entry of Object.values(actual.exports)) {
+            for (const target of Object.values(entry)) assert.ok(fs.existsSync(path.join(directory, target)))
+          }
+          console.log(`Verified registry download of ${actual.name}@${actual.version}: runtime matches build and all exports resolve`)
+          NODE
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
