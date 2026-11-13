@@ -8,7 +8,6 @@ on:
       - '**.md'
       - 'dev/**'
       - 'examples/**'
-      - '.github/**'
   workflow_dispatch:  # Allow manual triggering
 
 env:
@@ -93,7 +92,9 @@ jobs:
       - name: Publish to npm
         timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
-        run: pnpm publish --no-git-checks --provenance --access public
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP/npm-release"
+          npm publish "$RUNNER_TEMP/npm-release/payload-auth-cookie-${{ steps.check.outputs.version }}.tgz" --provenance --access public
 
       - name: Modify package.json for GitHub Packages
         timeout-minutes: 3
@@ -119,7 +120,9 @@ jobs:
       - name: Publish to GitHub Packages
         timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
-        run: pnpm publish --no-git-checks --access public
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP/github-release"
+          npm publish "$RUNNER_TEMP/github-release/markkropf-payload-auth-cookie-${{ steps.check.outputs.version }}.tgz" --access public --registry https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
