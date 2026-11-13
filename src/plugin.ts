@@ -2,6 +2,8 @@ import type { Config } from 'payload'
 import type { AuthPluginConfig } from './types.js'
 import { createUsersCollection } from './collections/createUsersCollection.js'
 import { withUsersCollection } from './collection/withUsersCollection.js'
+import { withAccountsCollection } from './collection/withAccountsCollection.js'
+import { assertLinkedConfig } from './lib/identity-resolver.js'
 import { createAuthEndpoints } from './endpoints/index.js'
 import { createCookieAuthStrategy } from './lib/strategy.js'
 import { validateSSOConfig } from './lib/sso-session.js'
@@ -52,6 +54,10 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
       ...pluginConfig,
     }
 
+    if (config.accountsCollectionSlug || config.identity) {
+      assertLinkedConfig(config)
+    }
+
     const existingUserCollection = incomingConfig.collections?.find(
       (c) => c.slug === config.usersCollectionSlug,
     )
@@ -69,10 +75,18 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
       config.usersCollectionSlug,
       config.sso,
       config.allowSignUp,
+      config,
     )
 
     if (!existingUserCollection) {
       const userCollection = createUsersCollection(config.usersCollectionSlug, config.useAdmin)
+
+      if (config.accountsCollectionSlug) {
+        userCollection.auth = {
+          ...(typeof userCollection.auth === 'object' ? userCollection.auth : {}),
+          disableLocalStrategy: true,
+        }
+      }
 
       if (userCollection.auth && typeof userCollection.auth === 'object') {
         userCollection.auth.strategies = [
@@ -88,6 +102,18 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
         const existingCollection = withUsersCollection(collections[index])
 
         let authConfig = existingCollection.auth
+        if (config.accountsCollectionSlug && authConfig === false) {
+          throw new Error('Linked identities require an auth-enabled users collection')
+        }
+        if (
+          config.accountsCollectionSlug &&
+          typeof authConfig === 'object' &&
+          authConfig.useAPIKey
+        ) {
+          throw new Error(
+            'Linked identities require central SSO; native API-key auth cannot be enabled',
+          )
+        }
         if (authConfig !== false) {
           if (authConfig === true || authConfig === undefined) {
             authConfig = {
@@ -103,7 +129,39 @@ export function authPlugin(pluginConfig: AuthPluginConfig) {
 
         collections[index] = {
           ...existingCollection,
-          auth: authConfig,
+          auth:
+            config.accountsCollectionSlug && typeof authConfig === 'object'
+              ? { ...authConfig, disableLocalStrategy: true }
+              : authConfig,
+        }
+      }
+    }
+
+    if (config.accountsCollectionSlug) {
+      const index = collections.findIndex(
+        (collection) => collection.slug === config.accountsCollectionSlug,
+      )
+      if (index === -1) {
+        collections.push(
+          withAccountsCollection(
+            { slug: config.accountsCollectionSlug },
+            {
+              usersCollectionSlug: config.usersCollectionSlug,
+              realm: config.name,
+            },
+          ),
+        )
+      } else {
+        const options = collections[index].custom?.ssoAccounts as
+          | { usersCollectionSlug?: string; realm?: string }
+          | undefined
+        if (
+          options?.usersCollectionSlug !== config.usersCollectionSlug ||
+          options.realm !== config.name
+        ) {
+          throw new Error(
+            'Accounts collection must use withAccountsCollection with the matching user collection and realm',
+          )
         }
       }
     }

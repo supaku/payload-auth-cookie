@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.15] - 2026-11-13
+
+- Add opt-in App/Admin account collections and stable centralized SSO identity binding.
+- Preserve existing email-based consumers unless linked-account mode is configured.
+- Enforce binding, revocation, closed signup and realm ownership consistently across strategy, login, session and user-info paths.
+- Prevent native JWT fallback from authenticating linked collections while preserving unrelated local authentication.
+- Add transaction/race regression coverage on disposable MongoDB and PostgreSQL, and exclude test fixtures from published artifacts.
+- Run CI on Node 24 with explicit job/step deadlines and real-adapter checks.
+
 All notable changes to this project will be documented in this file.
 
 ## [0.0.14] - 2026-03-06

@@ -1,6 +1,9 @@
 import type { Payload } from 'payload'
-import type { SSOProviderConfig } from '../types.js'
-import { parseCookies, validateSSOSession, getEmailFromSession } from './sso-session.js'
+import type { AuthPluginConfig, SSOProviderConfig } from '../types.js'
+import { resolveSSOUser } from './identity-resolver.js'
+import { parseCookies, validateSSOSession } from './sso-session.js'
+
+const guardedJWTStrategies = new WeakMap<object, WeakMap<Payload, Set<string>>>()
 
 export interface CookieAuthStrategyOptions {
   collectionSlug: string
@@ -24,11 +27,15 @@ export function createCookieAuthStrategy(
   collectionSlug: string,
   ssoConfig: SSOProviderConfig,
   allowSignUp?: boolean,
+  identityOptions?: Pick<AuthPluginConfig, 'name' | 'accountsCollectionSlug' | 'identity'>,
 ) {
   return {
     name: `sso-cookie-${collectionSlug}`,
     authenticate: async ({ headers, payload }: { headers: Headers; payload: Payload }) => {
       try {
+        if (identityOptions?.accountsCollectionSlug) {
+          rejectLocalJWTFallback({ payload, collectionSlug })
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Payload's collections object uses dynamic keys
         const collection = (payload.collections as any)[collectionSlug]
 
@@ -59,91 +66,16 @@ export function createCookieAuthStrategy(
           return { user: null }
         }
 
-        const email = getEmailFromSession(session)
-
-        if (!email) {
-          return { user: null }
-        }
-
-        const users = await payload.find({
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Dynamic collection slug parameter
-          collection: collectionSlug as any,
-          where: {
-            email: {
-              equals: email,
-            },
+        const user = await resolveSSOUser({
+          payload,
+          config: {
+            name: identityOptions?.name || collectionSlug,
+            usersCollectionSlug: collectionSlug,
+            allowSignUp,
+            ...identityOptions,
           },
-          limit: 1,
-          overrideAccess: true,
+          session,
         })
-
-        let user = users.docs[0]
-
-        if (user) {
-          // Update existing user with SSO data
-          const updateData: Record<string, unknown> = {}
-
-          if (session.name && typeof session.name === 'string') {
-            updateData.name = session.name
-          }
-          if (session.firstName && typeof session.firstName === 'string') {
-            updateData.firstName = session.firstName
-          }
-          if (session.lastName && typeof session.lastName === 'string') {
-            updateData.lastName = session.lastName
-          }
-          if (session.profilePictureUrl && typeof session.profilePictureUrl === 'string') {
-            updateData.profilePictureUrl = session.profilePictureUrl
-          }
-          if (session.emailVerified !== undefined) {
-            updateData.emailVerified = session.emailVerified
-          }
-          if (session.lastLoginAt !== undefined) {
-            updateData.lastLoginAt = session.lastLoginAt
-          }
-
-          if (Object.keys(updateData).length > 0) {
-            user = await payload.update({
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Dynamic collection slug from config
-              collection: collectionSlug as any,
-              id: user.id,
-              data: updateData,
-              overrideAccess: true,
-            })
-          }
-        } else {
-          if (!allowSignUp) {
-            return { user: null }
-          }
-
-          const createData: Record<string, unknown> = { email }
-
-          if (session.name && typeof session.name === 'string') {
-            createData.name = session.name
-          }
-          if (session.firstName && typeof session.firstName === 'string') {
-            createData.firstName = session.firstName
-          }
-          if (session.lastName && typeof session.lastName === 'string') {
-            createData.lastName = session.lastName
-          }
-          if (session.profilePictureUrl && typeof session.profilePictureUrl === 'string') {
-            createData.profilePictureUrl = session.profilePictureUrl
-          }
-          if (session.emailVerified !== undefined) {
-            createData.emailVerified = session.emailVerified
-          }
-          if (session.lastLoginAt !== undefined) {
-            createData.lastLoginAt = session.lastLoginAt
-          }
-
-          user = await payload.create({
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Dynamic collection slug from config
-            collection: collectionSlug as any,
-            data: createData,
-            overrideAccess: true,
-          })
-        }
 
         return {
           user: {
@@ -159,4 +91,35 @@ export function createCookieAuthStrategy(
       }
     },
   }
+}
+
+/** Payload's global JWT strategy does not honor a target collection's disableLocalStrategy. */
+function rejectLocalJWTFallback({
+  payload,
+  collectionSlug,
+}: {
+  payload: Payload
+  collectionSlug: string
+}): void {
+  const strategy = payload.authStrategies?.find((entry) => entry.name === 'local-jwt')
+  if (!strategy) {
+    return
+  }
+  let scopes = guardedJWTStrategies.get(strategy)
+  if (!scopes) {
+    scopes = new WeakMap<Payload, Set<string>>()
+    guardedJWTStrategies.set(strategy, scopes)
+    const blocked = scopes
+    const authenticate = strategy.authenticate
+    strategy.authenticate = async (args) => {
+      const result = await authenticate(args)
+      if (result.user && blocked.get(args.payload)?.has(result.user.collection)) {
+        return { ...result, user: null }
+      }
+      return result
+    }
+  }
+  const collections = scopes.get(payload) || new Set<string>()
+  collections.add(collectionSlug)
+  scopes.set(payload, collections)
 }

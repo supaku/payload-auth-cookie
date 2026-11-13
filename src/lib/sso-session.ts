@@ -1,6 +1,8 @@
 import { jwtVerify } from 'jose'
 import type { FieldMappingConfig, JWTVerificationConfig, SSOProviderConfig } from '../types.js'
 
+const emailVerificationClaim = Symbol('emailVerificationClaim')
+
 /**
  * Session data returned from the external SSO session validation endpoint
  */
@@ -40,7 +42,7 @@ export function parseCookies(headers: Headers): Record<string, string> {
  * Get a nested value from an object using dot notation
  * @example getNestedValue({ user: { email: 'test@example.com' } }, 'user.email') => 'test@example.com'
  */
-function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
+export function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   return path.split('.').reduce((current: unknown, key) => {
     if (current && typeof current === 'object' && key in current) {
       return (current as Record<string, unknown>)[key]
@@ -57,7 +59,7 @@ function extractSessionData(
   fieldMappings?: FieldMappingConfig,
 ): SSOSessionData | null {
   const emailField = fieldMappings?.emailField || 'email'
-  const nameField = fieldMappings?.nameField
+  const nameField = fieldMappings?.nameField || 'name'
   const firstNameField = fieldMappings?.firstNameField || 'firstName'
   const lastNameField = fieldMappings?.lastNameField || 'lastName'
   const profilePictureUrlField = fieldMappings?.profilePictureUrlField || 'profilePictureUrl'
@@ -90,7 +92,8 @@ function extractSessionData(
     parsedLastLoginAt = new Date(lastLoginAt * 1000).toISOString()
   }
 
-  return {
+  const session = {
+    ...data,
     email,
     name: typeof name === 'string' ? name : undefined,
     firstName: typeof firstName === 'string' ? firstName : undefined,
@@ -98,8 +101,20 @@ function extractSessionData(
     profilePictureUrl: typeof profilePictureUrl === 'string' ? profilePictureUrl : undefined,
     emailVerified: parsedEmailVerified,
     lastLoginAt: parsedLastLoginAt,
-    ...data,
   }
+  Object.defineProperty(session, emailVerificationClaim, { value: emailVerified === true })
+  return session
+}
+
+/** Preserve legacy display normalization without treating a string claim as verified ownership. */
+export function hasVerifiedEmailForBinding(session: SSOSessionData): boolean {
+  if (emailVerificationClaim in session) {
+    return (session as SSOSessionData & { [emailVerificationClaim]: boolean })[
+      emailVerificationClaim
+    ]
+  }
+  // Direct server callers must pass an already validated session; a literal boolean is required.
+  return session.emailVerified === true
 }
 
 /**
@@ -168,6 +183,9 @@ export async function fetchSSOSession(
     }
 
     const data = await response.json()
+    if (!data || typeof data !== 'object' || data.authenticated === false) {
+      return null
+    }
 
     // Handle common response patterns:
     // 1. { authenticated: true, user: { email, ... } }

@@ -11,45 +11,67 @@ on:
       - '.github/**'
   workflow_dispatch:  # Allow manual triggering
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write # Required for creating releases
       packages: write # Required for GitHub Packages
       id-token: write # Required for npm provenance
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 3
         with:
           fetch-depth: 0  # Fetch all history for version-check to search commits
 
       - name: Setup pnpm
+        timeout-minutes: 3
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
       - name: Setup Node.js
+        timeout-minutes: 3
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: pnpm install
+        timeout-minutes: 5
+        run: pnpm install --frozen-lockfile
 
       - name: Run linter
+        timeout-minutes: 3
         run: pnpm lint
 
+      - name: Locate disposable PostgreSQL binaries
+        timeout-minutes: 1
+        run: |
+          pg_test_bin="$(pg_config --bindir)"
+          test -x "$pg_test_bin/initdb"
+          test -x "$pg_test_bin/pg_ctl"
+          echo "PG_TEST_BIN=$pg_test_bin" >> "$GITHUB_ENV"
+
       - name: Run tests
-        run: pnpm test:int
+        timeout-minutes: 8
+        run: pnpm test:int --run
         env:
           NODE_ENV: test
+          RUN_IDENTITY_ADAPTER_TESTS: '1'
+          RUN_IDENTITY_POSTGRES_TESTS: '1'
 
       - name: Build
+        timeout-minutes: 5
         run: pnpm build
 
       - name: Check if version exists on npm
+        timeout-minutes: 3
         id: check
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
@@ -64,14 +86,17 @@ jobs:
           fi
 
       - name: Update npm for Trusted Publishers
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         run: npm install -g npm@latest
 
       - name: Publish to npm
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         run: pnpm publish --no-git-checks --provenance --access public
 
       - name: Modify package.json for GitHub Packages
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         run: |
           # Create a scoped version of the package for GitHub Packages
@@ -83,20 +108,23 @@ jobs:
           "
 
       - name: Setup Node.js for GitHub Packages
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://npm.pkg.github.com'
           scope: '@markkropf'
 
       - name: Publish to GitHub Packages
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         run: pnpm publish --no-git-checks --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
+        timeout-minutes: 3
         if: steps.check.outputs.should_publish == 'true'
         run: |
           gh release create "v${{ steps.check.outputs.version }}" \
