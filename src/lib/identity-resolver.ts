@@ -500,6 +500,21 @@ function key(parts: string[]): string {
 }
 
 function isRetryableConflict(error: unknown): boolean {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'errorLabels' in error &&
+    Array.isArray(error.errorLabels) &&
+    error.errorLabels.length
+  ) {
+    // An uncertain commit cannot safely restart the whole transaction.
+    if (error.errorLabels.includes('UnknownTransactionCommitResult')) {
+      return false
+    }
+    if (error.errorLabels.includes('TransientTransactionError')) {
+      return true
+    }
+  }
   const message = error instanceof Error ? error.message : String(error)
   return /unique|duplicate|conflict|writeconflict|serialization|deadlock/i.test(message)
 }
