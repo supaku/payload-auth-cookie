@@ -5,24 +5,13 @@ import { describe, it, beforeAll, expect } from 'vitest'
 
 let payload: Payload
 
-describe('API', () => {
+describe.skipIf(!process.env.DATABASE_URI)('API', () => {
   beforeAll(async () => {
-    if (!process.env.DATABASE_URI) {
-      console.warn('Skipping integration tests: DATABASE_URI not configured')
-      return
-    }
-
     const payloadConfig = await config
     payload = await getPayload({ config: payloadConfig })
   })
 
   it('fetches admin users', async () => {
-    // Skip if payload wasn't initialized
-    if (!payload) {
-      console.warn('Skipping test: Payload not initialized')
-      return
-    }
-
     const users = await payload.find({
       collection: 'adminUsers',
     })
@@ -30,12 +19,6 @@ describe('API', () => {
   })
 
   it('fetches app users', async () => {
-    // Skip if payload wasn't initialized
-    if (!payload) {
-      console.warn('Skipping test: Payload not initialized')
-      return
-    }
-
     const users = await payload.find({
       collection: 'appUsers',
     })
