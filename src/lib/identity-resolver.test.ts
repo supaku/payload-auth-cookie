@@ -333,6 +333,54 @@ describe('stable linked identities', () => {
     expect(f.state()['app-accounts']).toHaveLength(1)
   })
 
+  it('retries a labeled MongoDB transaction conflict without relying on its message', async () => {
+    const f = fixture()
+    const error = Object.assign(
+      new Error('Caused by ::  :: Please retry your operation or multi-document transaction.'),
+      { errorLabels: ['TransientTransactionError'] },
+    )
+    f.mock.create.mockRejectedValueOnce(error)
+    expect((await resolveSSOUser({ payload: f.payload, config, session })).id).toBe(seed.id)
+    expect(f.mock.db.beginTransaction).toHaveBeenCalledTimes(2)
+    expect(f.mock.db.rollbackTransaction).toHaveBeenCalledTimes(1)
+    expect(f.state()['app-accounts']).toHaveLength(1)
+  })
+
+  it('bounds retries when MongoDB continues reporting a transient transaction error', async () => {
+    const f = fixture()
+    const error = Object.assign(new Error('Please retry your multi-document transaction'), {
+      errorLabels: ['TransientTransactionError'],
+    })
+    f.mock.create.mockRejectedValue(error)
+    await expect(resolveSSOUser({ payload: f.payload, config, session })).rejects.toBe(error)
+    expect(f.mock.db.beginTransaction).toHaveBeenCalledTimes(3)
+    expect(f.mock.db.rollbackTransaction).toHaveBeenCalledTimes(3)
+    expect(f.state()['app-accounts']).toHaveLength(0)
+  })
+
+  it.each([
+    { errorLabels: ['UnknownTransactionCommitResult'] },
+    {
+      errorLabels: ['UnknownTransactionCommitResult', 'TransientTransactionError'],
+    },
+  ])(
+    'does not restart a transaction after an unknown commit outcome: $errorLabels',
+    async ({ errorLabels }) => {
+      const f = fixture()
+      const error = Object.assign(
+        new Error('Transaction conflict with unconfirmed commit outcome'),
+        {
+          errorLabels,
+        },
+      )
+      f.mock.db.commitTransaction.mockRejectedValueOnce(error)
+      await expect(resolveSSOUser({ payload: f.payload, config, session })).rejects.toBe(error)
+      expect(f.mock.db.beginTransaction).toHaveBeenCalledTimes(1)
+      expect(f.mock.db.rollbackTransaction).toHaveBeenCalledTimes(1)
+      expect(f.state()['app-accounts']).toHaveLength(0)
+    },
+  )
+
   it('rejects an adapter that returns from commit without persisting the binding', async () => {
     const f = fixture({ 'app-users': [], 'app-accounts': [] })
     f.mock.db.commitTransaction.mockImplementation(async () => {})
